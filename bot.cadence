@@ -1,0 +1,177 @@
+# A starter robot for rules v2: sweep a medium scan to find a robot, narrow
+# it to hold the robot, pick shot power by range, and fire only when the
+# turret is on target and the battery can spare it. With nothing in the
+# scan, follow a passive cue; step out of the storm. Each state sets controls
+# every tick and moves to another state when a condition holds.
+#
+# The trade-offs:
+#   scan     a narrow arc reaches further; a wide one finds robots nearby
+#   power    heavy shots hit harder for less battery, but fly slowly
+#   battery  shots and driving share it, and it refills slowly
+#   turret   it turns at a limited rate; aim is where it points now
+#
+# Classic matches steer with drive, turn and pitch. The force rulesets
+# (everything but classic) read thrust, yaw-torque, lift and the other force
+# controls instead, so each state sets both: hover about 60 above the ground,
+# keep the hull level and damp spin with the rate sensors. Neither state
+# strafes: aim spread grows with the robot's own speed.
+# Values: ruleset physics-mode zero-g control-model inertial mode3 tick
+#   time remaining width height depth gravity-x gravity-y gravity-z
+#   terrain-kind hills health x y z vx vy vz heading pitch yaw-rate
+#   pitch-rate roll-rate forward-x forward-y forward-z right-x right-y
+#   right-z up-x up-y up-z grounded altitude battery battery-capacity aim
+#   aim-pitch cooldown scan-heading scan-pitch scan-arc scan-range contact
+#   range bearing elevation cue-present cue-error bearing-rate zone-active
+#   zone-radius storm-active storm-radius hill-active hill-radius score
+#   score-best speed gravity terrain-height battery-fraction aim-error
+#   power-min power-max shot-speed-base shot-speed-per-power
+#   shot-cost-base shot-cost-per-power zone-distance zone-bearing
+#   zone-elevation storm-distance storm-bearing storm-heading cue-muzzle
+#   cue-bearing cue-elevation cue-range cue-age pickup-present
+#   pickup-bearing pickup-elevation pickup-range on-hill hill-held
+#   hill-bearing hill-elevation hill-range hill-time hill-to-win
+# Older names: energy (battery) max-energy (battery-capacity)
+#   energy-fraction (battery-fraction) fire-base (shot-cost-base)
+#   fire-per-power (shot-cost-per-power)
+# cue-* is the most accurate passive contact, kept 60 ticks: where to
+# look, not where to shoot. A distance to something absent reads 1e12.
+# Controls: drive turn pitch thrust strafe lift yaw-torque pitch-torque
+#   roll-torque brake aim-heading aim-pitch fire power scan-heading
+#   scan-arc scan-pitch status-text status-value (not in the -wasm builds)
+# Functions: min max abs clamp(x, low, high) sin cos wave(period, amplitude)
+#   sweep(degreesPerTick) angle(target, current) atan2(y, x) (degrees)
+# Manual: https://clunkyard.com/manual#dsl
+bot My robot
+modes 2d 3d
+rulesets classic inertial-2d gravity-flat gravity-hills zero-g
+initial search
+
+state search
+  # Under a quarter battery, drive at half speed.
+  each drive 0.6 - 0.3 * (battery-fraction < 0.25)
+  each turn 0.25
+  each pitch clamp(-pitch / 45, -1, 1)
+  each thrust 0.6 - 0.3 * (battery-fraction < 0.25)
+  each yaw-torque clamp(0.2 - yaw-rate / 60, -1, 1)
+  each lift clamp(-gravity-z / 100 + gravity * (60 - altitude) / 100 - vz / 50, -1, 1)
+  each pitch-torque clamp(-pitch / 40 - pitch-rate / 60, -1, 1)
+  each roll-torque clamp(-roll-rate / 60, -1, 1)
+  each brake speed > 70
+  # A medium arc sweeps the circle in half a second, reaching about 520.
+  # Nod it up and down for 3D targets; on the tick a contact appears, hold
+  # it there so track starts with a lock.
+  each scan-heading scan-heading + 36 * (not contact)
+  each scan-pitch wave(31, 25) * (not contact) + elevation * contact
+  each scan-arc 40
+  when storm-distance < 60 -> storm
+  when zone-active and zone-distance > zone-radius - 60 -> home
+  when contact -> track
+  when cue-present -> listen
+end
+
+# A passive cue says roughly where a robot is, within cue-error degrees:
+# head that way and sweep a narrow scan across it. It reaches further than
+# the medium scan, and the cue is no firing solution.
+state listen
+  each drive 0.6 - 0.3 * (battery-fraction < 0.25)
+  each turn clamp(angle(cue-bearing, heading) / 45, -1, 1)
+  each pitch clamp(-pitch / 45, -1, 1)
+  each thrust 0.6 - 0.3 * (battery-fraction < 0.25)
+  each yaw-torque clamp(angle(cue-bearing, heading) / 70 - yaw-rate / 60, -1, 1)
+  each lift clamp(-gravity-z / 100 + gravity * (60 - altitude) / 100 - vz / 50, -1, 1)
+  each pitch-torque clamp(-pitch / 40 - pitch-rate / 60, -1, 1)
+  each roll-torque clamp(-roll-rate / 60, -1, 1)
+  each brake speed > 70
+  each scan-heading cue-bearing + wave(14, cue-error + 10)
+  each scan-pitch cue-elevation * (not contact) + elevation * contact
+  each scan-arc 30
+  when storm-distance < 60 -> storm
+  when zone-active and zone-distance > zone-radius - 60 -> home
+  when contact -> track
+  when not cue-present -> search
+end
+
+# The storm drifts across the arena and hurts anything inside it: step out
+# across its path, shooting at anything in the scan on the way. The way out
+# is at right angles to its drift, on the side this robot is already on, so
+# the storm passes by. When its centre lies to the left of its drift
+# (angle(...) > 0 is 1), this robot is on the right of its path, so the way
+# out is storm-heading - 90; otherwise it is + 90.
+state storm
+  each set out storm-heading + 90 - 180 * (angle(storm-bearing, storm-heading) > 0)
+  each turn clamp(angle(out, heading) / 30, -1, 1)
+  each pitch clamp(-pitch / 45, -1, 1)
+  each drive 1
+  each thrust 0.8
+  each yaw-torque clamp(angle(out, heading) / 70 - yaw-rate / 60, -1, 1)
+  each lift clamp(-gravity-z / 100 + gravity * (60 - altitude) / 100 - vz / 50, -1, 1)
+  each pitch-torque clamp(-pitch / 40 - pitch-rate / 60, -1, 1)
+  each roll-torque clamp(-roll-rate / 60, -1, 1)
+  each aim-heading bearing
+  each set lob elevation - gravity-z * 28.6 / max(range, shot-speed-base + shot-speed-per-power * power-max)
+  each aim-pitch lob
+  each scan-heading bearing * contact + (scan-heading + 36) * (not contact)
+  each scan-pitch elevation
+  each scan-arc 40 - 20 * contact
+  each set shot clamp((range - shot-speed-base) / shot-speed-per-power, power-min, power-max)
+  each power shot
+  each fire contact and cooldown == 0 and abs(aim-error) < 3 and abs(lob - aim-pitch) < 3 and battery >= shot-cost-base + shot-cost-per-power * shot + 10
+  when storm-distance > 100 -> search
+end
+
+state track
+  # Circle the target instead of driving straight at it: a robot crossing
+  # the line of fire is harder to hit. Driving costs battery, so go gently.
+  each turn clamp(angle(bearing + 90 + wave(50, 30), heading) / 45, -1, 1)
+  each pitch clamp(-pitch / 45, -1, 1)
+  each drive 0.5 - 0.25 * (battery-fraction < 0.25)
+  each thrust clamp((range - 200) / 180, -0.5, 0.6) * (1 - 0.5 * (battery-fraction < 0.25))
+  each yaw-torque clamp(angle(bearing, heading) / 70 - yaw-rate / 60, -1, 1)
+  each lift clamp(-gravity-z / 100 + gravity * (60 - altitude) / 100 - vz / 50, -1, 1)
+  each pitch-torque clamp(-pitch / 40 - pitch-rate / 60, -1, 1)
+  each roll-torque clamp(-roll-rate / 60, -1, 1)
+  each brake speed > 70
+  each aim-heading bearing
+  # Under gravity a shot drops on the way; it takes about a second, so aim
+  # higher by about half the gravity over the range (in degrees).
+  each set lob elevation - gravity-z * 28.6 / max(range, shot-speed-base + shot-speed-per-power * power-max)
+  each aim-pitch lob
+  each scan-heading bearing
+  each scan-pitch elevation
+  # Narrow: holds the contact and reaches about 735.
+  each scan-arc 20
+  # The heaviest shot that still reaches the target in about one second:
+  # shot speed is shot-speed-base + shot-speed-per-power * power.
+  each set shot clamp((range - shot-speed-base) / shot-speed-per-power, power-min, power-max)
+  each power shot
+  # Fire once the turret has slewed onto the target, keeping 10 in the
+  # battery after paying for the shot.
+  each fire cooldown == 0 and abs(aim-error) < 3 and abs(lob - aim-pitch) < 3 and battery >= shot-cost-base + shot-cost-per-power * shot + 10
+  when storm-distance < 60 -> storm
+  when zone-active and zone-distance > zone-radius - 60 -> home
+  when not contact -> search
+end
+
+state home
+  # Sudden death: head back towards the middle of the safe zone, and keep
+  # shooting at anything in the scan on the way.
+  each turn clamp(angle(zone-bearing, heading) / 30, -1, 1)
+  each pitch clamp((zone-elevation - pitch) / 30, -1, 1)
+  each drive 0.8
+  each thrust 0.6
+  each yaw-torque clamp(angle(zone-bearing, heading) / 70 - yaw-rate / 60, -1, 1)
+  each lift clamp(-gravity-z / 100 + gravity * (60 - altitude) / 100 + sin(zone-elevation) - vz / 50, -1, 1)
+  each pitch-torque clamp(-pitch / 40 - pitch-rate / 60, -1, 1)
+  each roll-torque clamp(-roll-rate / 60, -1, 1)
+  each brake speed > 70
+  each aim-heading bearing
+  each set lob elevation - gravity-z * 28.6 / max(range, shot-speed-base + shot-speed-per-power * power-max)
+  each aim-pitch lob
+  each scan-heading bearing * contact + (scan-heading + 36) * (not contact)
+  each scan-pitch elevation
+  each scan-arc 40 - 20 * contact
+  each set shot clamp((range - shot-speed-base) / shot-speed-per-power, power-min, power-max)
+  each power shot
+  each fire contact and cooldown == 0 and abs(aim-error) < 3 and abs(lob - aim-pitch) < 3 and battery >= shot-cost-base + shot-cost-per-power * shot + 10
+  when zone-distance < zone-radius - 120 -> search
+end
