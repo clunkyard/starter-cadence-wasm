@@ -146,7 +146,7 @@ state track
   each power shot
   # Fire once the turret has slewed onto the target, keeping 10 in the
   # battery after paying for the shot.
-  each fire cooldown == 0 and abs(aim-error) < 3 and abs(lob - aim-pitch) < 3 and battery >= shot-cost-base + shot-cost-per-power * shot + 10
+  each fire contact and cooldown == 0 and abs(aim-error) < 3 and abs(lob - aim-pitch) < 3 and battery >= shot-cost-base + shot-cost-per-power * shot + 10
   when storm-distance < 60 -> storm
   when zone-active and zone-distance > zone-radius - 60 -> home
   when not contact -> search
